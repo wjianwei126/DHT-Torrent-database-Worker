@@ -24,15 +24,12 @@ class PeerException(Exception):
 	pass
 
 class Peer:
-
 	def __init__(self, socket, torrent = None):
 		self.socket = socket
 		self.torrent = torrent
 		self.handshakeSend = False
 		self.handshakeReceived = False
 		
-	def _handleConnection(self):
-	
 	def _receiveHandshake(self):
 		pstr_len = struct.unpack(">B",self.socket.recv(1))
 		self.pstr = self.socket.recv(pstr_len) 
@@ -82,6 +79,10 @@ class Peer:
 		self.socket.send(packed)
 		self.handshakeSend = True
 	
+	def doReceiveHandshake(self):
+		if not self.handshakeReceived:
+			self._receiveHandshake()
+
 	def performHandshake(self):
 		"""
 		Performs a complete handshake with the peer
@@ -132,31 +133,35 @@ class Torrent:
 		self.info_hash = info_hash
 		self.metadata = []
 		self.metadataLength = -1
+		self.finished = False
 		self.peer_list = set()
 		self.peers = []
-		start_new_thread(self.run, tuple())
+		start_new_thread(self._run, tuple())
 		
 	def openConnection(self, ip, port):
 		self.log("Connecting to peer "+ip+":"+str(port))
 		socket = socket.create_connection((ip, port),20)
 		peer = Peer(self, socket)
 		peer.performHandshake()
+		self._handlePeer(peer)
+
+	def addPeer(self, peer):
+		peer.torrent = self
+		peer.performHandshake()
+		self._handlePeer(peer)
+
+	def _handlePeer(self, peer):
 		if peer.info_hash != self.info_hash:
 			peer.close()
 			raise PeerException, "Peer is serving the wrong torrent"
-		self.handleSocket(peer)
-
-	def handleIncoming(self, peer):
-		self.log("Incoming peer "+ip+":"+str(port))	
-
-	def handlePeer(self, peer):
 		self.peers.append(peer)
+		
 		try:
 			peer.loop()
 			peer.close()
 		finally:
 			self.peers.remove(peer)
-
+	
 	def _updatePeers(self):
 		self.log("Getting peer list...")
 		peer_list = None
@@ -177,7 +182,7 @@ class Torrent:
 		self.peer_list = set(self.peer_list + peer_list)
 		self.log("Have "+str(len(self.peer_list))+" peers")
 
-	def run(self):
+	def _run(self):
 		if len(peer_list) == 0:
 			self.log("Not enough peers, exiting...")
 		
@@ -195,9 +200,35 @@ class Torrent:
 		print "Torrent "+(self.info_hash.encode("hex"))+": "+str(what)
 
 class TorrentManager:
-	def __init__(self, port):
+	def __init__(self, dht, port, onfinish):
+		self.dht = dht
+		self.port = port
+		self.onfinish = onfinish
 		self.running = {}
-	
-	def _loop(self):
+		start_new_thread(self._run,tuple())
+
+	def addTorrent(self, info_hash):
+		if not info_hash in self.running:
+			torrent = Torrent(self.dht, info_hash)
+			self.running.append(torrent)
+
+	def fetchAndRemove(self):
+		pass
+
+	def _run(self):
+		serversocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+		serversocket.bind((socket.gethostname(), 80))
+		serversocket.listen(10)
 		while True:
-			pass	
+			socket, address = serversocket.accept()
+			start_new_thread(self._handlePeer, tuple(socket))
+
+	def _handlePeer(self, socket):
+		peer = Peer(None, socket)
+		peer.doReceiveHandshake()
+		info_hash = peer.info_hash			
+		if info_hash in self.running:
+			torrent = self.running[info_hash]
+			torrent.addPeer(peer)
+		else:
+			peer.close()
