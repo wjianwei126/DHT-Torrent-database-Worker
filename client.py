@@ -1,8 +1,3 @@
-"""
-	Basic program to show the useage of lightdht.
-	
-	We run a dht node and log all incoming queries.
-"""
 import logging
 import hashlib
 import time
