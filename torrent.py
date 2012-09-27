@@ -303,13 +303,10 @@ class TorrentManager:
 			self.running[info_hash] = torrent
 	
 	def _run(self):
-<<<<<<< HEAD
 		serversocket = pysocket.socket(pysocket.AF_INET, pysocket.SOCK_STREAM)
 		serversocket.bind(('localhost', self.port))
-=======
 		serversocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 		serversocket.bind((socket.gethostname(), self.port))
->>>>>>> 962fa024d0a44e541ba5fc74e7167f341a2cc493
 		serversocket.listen(10)
 		while True:
 			socket, address = serversocket.accept()
