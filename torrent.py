@@ -6,6 +6,8 @@ import socket as pysocket
 import bencode
 import traceback
 import math
+import random
+import hashlib
 
 def recvAll(stream, l):
 	data = ""
@@ -26,6 +28,7 @@ class Peer:
 		self.handshakeSend = False
 		self.handshakeReceived = False
 		self.extensionHandshakeReceived = False
+		self.closed = False
 
 	def _receiveHandshake(self):
 		pstr_len = ord(recvAll(self.socket,1))
@@ -54,7 +57,7 @@ class Peer:
 			l = l + len(contents)
 			msg = msg + contents
 		packed = struct.pack(">I",l) + msg
-		self.socket.send(packed)
+		self.socket.sendall(packed)
 
 	#Returns tuple(length, msgtype, data)
 	def _receiveMessage(self):
@@ -81,12 +84,12 @@ class Peer:
 		info_hash = self.torrent.info_hash
 		_id = "-TI0001-TORRENTINDEX"
 		packed = chr(pstr_len) + pstr + reserved + info_hash + _id
-		self.socket.send(packed)
+		self.socket.sendall(packed)
 		self._sendExtensionHandshake()
 		self.handshakeSend = True
 
 	def _sendExtensionHandshake(self):
-		contents = bencode.bencode({'m': {'ut_metadata': 3}, 'metadata_size': 0, 'v':'DHT-Crawler-0.1'})	
+		contents = {'m': {'ut_metadata': 3}, 'metadata_size':0,'v':'DHT-Crawler-0.1'}	
 		self._sendExtensionMessage(0, contents)		
 	
 	def _sendExtensionMessage(self, msg, contents, add = None):
@@ -111,15 +114,14 @@ class Peer:
 	
 
 	def _requestPiece(self):
+		if self.torrent.finished:
+			return
 		piece = self.torrent.getNeededPiece()
-		if piece == -1:
-			self.socket.close()
-			raise PeerException, "Can't request piece, download is complete"
 		self._sendExtensionMessage(self.metadata_id,{'msg_type':0,'piece':piece})		
 
 	#Mainloop
 	def loop(self):
-		while not self.torrent.finished:
+		while not self.torrent.finished and not self.closed:
 			length, msgtype, content = self._receiveMessage()
 			if length > 0:
 				if msgtype == 20:
@@ -143,7 +145,6 @@ class Peer:
 	
 	def _metadataExt(self, msg, extra):
 		msg_type = msg['msg_type']
-		print "META:"+str(msg_type)
 		torrent = self.torrent
 		if msg_type == 0:
 			#request
@@ -157,19 +158,24 @@ class Peer:
 			self._requestPiece()
 		elif msg_type == 2:
 			#reject
-			#Was rejected, try again
-			self._requestPiece()
+			self.socket.close()
+			raise PeerException, "Peer is rejecting metadata requests"
 
 	def _extended(self, data):
 		msgtype = ord(data[0])
-		print "EXT:"+str(msgtype)
 		if msgtype == 0 and not self.extensionHandshakeReceived:
 			#handshake
 			payload = bencode.bdecode(data[1:])
 			if not "metadata_size" in payload or not "ut_metadata" in payload['m']:
 				self.socket.close()
 				raise PeerException, "Peer does not support the ut_metadata extension"
-			self.torrent.setMetadataSize( payload['metadata_size'])
+			
+			size = payload['metadata_size']
+			if size == 0:
+				self.socket.close()
+				raise PeerException, "The peer does not appear to have any metadata"
+
+			self.torrent.setMetadataSize(size)
 			self.metadata_id = payload['m']['ut_metadata']
 			self.extensionHandshakeReceived = True
 			#everything seems fine, go ahead an request the first bit of metadata
@@ -185,12 +191,13 @@ class Peer:
 
 	def close(self):
 		self.socket.close()
+		self.closed = True
 
 class Torrent:
 	def __init__(self, dht, info_hash):
 		self.dht = dht
 		self.info_hash = info_hash
-		self.metadata = []
+		self.metadata = {}
 		self.metadataSize = -1
 		self.metadataPieces = 0
 		self.finished = False
@@ -201,27 +208,33 @@ class Torrent:
 	def gotMetadata(self, piece, content):
 		if not piece in self.metadata:
 			self.metadata[piece] = content
-			self.log("Got metadata "+str(piece)+"/"+str(self.metadataPieces))
+			self.log("Got metadata "+str(piece+1)+"/"+str(self.metadataPieces))
 		#Check if the torrent is finished
 		if self.getNeededPiece() == -1:
 			self.finished = True
+
+	def disconnect(self):
+		try:
 			for peer in self.peers:
-				peer.close()	
-	
+				peer.close()
+		except Exception, e:
+			traceback.print_exc()	
+
 	def setMetadataSize(self, size):
-		if size <= self.metadataSize:
-			return
 		self.metadataSize = size
 		self.metadataPieces = math.ceil(size / 16384)		
 		self.log("Downloading "+str(self.metadataPieces)+" pieces of metadata")
 	
 	def getNeededPiece(self):
 		piece = 0
+		pieces = []
 		while piece < self.metadataPieces:
 			if not piece in self.metadata:
-				return piece
+				pieces.append(piece)
 			piece = piece + 1
-		return -1
+		if len(pieces) == 0:
+			return -1
+		return random.choice(pieces)
 
 	def openConnection(self, ip, port):
 		self.log("Connecting to peer "+ip+":"+str(port))
@@ -285,6 +298,21 @@ class Torrent:
 				self.log("Error while loading metadata from peer "+ip+": "+str(e))
 				#traceback.print_exc()
 
+	def prepareData(self):
+		num = len(self.metadata)
+		if num != self.metadataPieces or num == 0:
+			return None
+		data = ""
+		for i in range(num):
+			data = data + self.metadata[i]
+		sha = hashlib.sha1()
+		sha.update(data)
+		info_hash = sha.digest()
+		if info_hash != self.info_hash:
+			self.log("The hashes do not match! ("+info_hash+") ")
+			return None
+		return data		
+
 	def log(self, what):
 		print "Torrent "+(self.info_hash.encode("hex"))+": "+str(what)
 
@@ -302,6 +330,15 @@ class TorrentManager:
 			torrent = Torrent(self.dht, info_hash)
 			self.running[info_hash] = torrent
 	
+	def fetchAndRemove(self):
+		for info_hash in self.running:
+			torrent = self.running[info_hash]
+			if torrent.finished:
+				del self.running[info_hash]
+				torrent.disconnect()
+				return (info_hash, torrent.prepareData())
+		return None
+
 	def _run(self):
 		serversocket = pysocket.socket(pysocket.AF_INET, pysocket.SOCK_STREAM)
 		serversocket.bind(('localhost', self.port))

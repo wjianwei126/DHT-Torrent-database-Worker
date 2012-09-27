@@ -62,12 +62,12 @@ decode_func['8'] = decode_string
 decode_func['9'] = decode_string
 
 def bdecode(x):
-	r, l = len_bdecode(x)
+	r, l = bdecode_len(x)
 	if l != len(x):
 		raise BTFailure("invalid bencoded value (data after valid prefix)")
 	return r
 
-def len_bdecode(x):
+def bdecode_len(x):
 	try:
 		return decode_func[x[0]](x, 0)
 	except (IndexError, KeyError, ValueError):

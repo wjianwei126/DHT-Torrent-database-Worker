@@ -39,8 +39,18 @@ dht.self_find_delay = 30
 test_hash = "8ac3731ad4b039c05393b5404afa6e7397810b41".decode("hex")
 manager.addTorrent(test_hash)
 
+def processFinished(info_hash, data):
+	if data == None:
+		print "There was a problem downloading "+info_hash.encode('hex')
+	else:
+		print "Downloaded "+info_hash.encode('hex')
+
 # Start it!
 with dht:
 	# Go to sleep and let the DHT service requests.
 	while True:
+		ret = manager.fetchAndRemove()
+		if ret != None:
+			info_hash, data = ret
+			processFinished(info_hash, data)
 		time.sleep(1)
