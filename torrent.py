@@ -217,7 +217,7 @@ class TorrentManager:
 
 	def _run(self):
 		serversocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-		serversocket.bind((socket.gethostname(), 80))
+		serversocket.bind((socket.gethostname(), self.port))
 		serversocket.listen(10)
 		while True:
 			socket, address = serversocket.accept()
