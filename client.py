@@ -17,7 +17,7 @@ id_ = os.urandom(20) #hashlib.sha1("Change this to avoid getting ID clashes").di
 dht = lightdht.DHT(port=8000, id_=id_) 
 
 #Running torrents that are downloading metadata
-torrents = {} 
+manager = torrent.TorrentManager(dht, 8000, None)
 
 # handler
 def myhandler(rec, c):
@@ -26,8 +26,7 @@ def myhandler(rec, c):
 			a = rec["a"]
 			if "info_hash" in a:
 				info_hash = a["info_hash"]
-				if not info_hash in torrents:
-					torrents[info_hash]	= torrent.Torrent(dht, info_hash)
+				manager.addTorrent(info_hash)
 
 	finally:
 		# always ALWAYS pass it off to the real handler
@@ -38,7 +37,7 @@ dht.active_discovery = True
 dht.self_find_delay = 30
 
 test_hash = "8ac3731ad4b039c05393b5404afa6e7397810b41".decode("hex")
-torrents[test_hash] = torrent.Torrent(dht, test_hash)
+manager.addTorrent(test_hash)
 
 # Start it!
 with dht:
