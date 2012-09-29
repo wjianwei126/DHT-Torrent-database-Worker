@@ -1,3 +1,1 @@
-import bencode
-
-print str(bencode.bdecode(open("torrent").read()))
+#This file has no purpose anymore
