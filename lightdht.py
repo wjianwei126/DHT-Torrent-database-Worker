@@ -123,6 +123,7 @@ class Node(object):
 		self.treq = 0
 		self.trep = 0
 		self.t = set()
+		self.useid = os.urandom(20) # The id we pretend to be
 
 class KRPCServer(object):
 
@@ -232,7 +233,7 @@ class KRPCServer(object):
 				logger.critical("Exception while handling KRPC requests:\n\n"+traceback.format_exc()+("\n\n%r from %r" % (rec,c)))
 				
 
-	def send_krpc(self, req , node,callback=None):
+	def send_krpc(self, req , node, callback=None):
 		"""
 			Perform a KRPC request
 		"""
@@ -292,15 +293,15 @@ class KRPCServer(object):
 		return r["r"]
 		
 			
-	def ping(self,id_,node):
+	def ping(self, id_, node):
 		q = { "y":"q", "q":"ping", "a":{"id":id_}}		
 		return self._synctrans(q, node)		
 		
-	def find_node(self, id_,node, target):
+	def find_node(self, id_, node, target):
 		q = { "y":"q", "q":"find_node", "a":{"id":id_,"target":target}}
 		return self._synctrans(q, node)
 		
-	def get_peers(self, id_,node, info_hash):
+	def get_peers(self, id_, node, info_hash):
 		q = { "y":"q", "q":"get_peers", "a":{"id":id_,"info_hash":info_hash}}
 		return self._synctrans(q, node)
 
@@ -320,8 +321,7 @@ class NotFoundError(RuntimeError):
 	pass
 		
 class DHT(object):
-	def __init__(self, port, id_):	
-		self._id = id_
+	def __init__(self, port):	
 		self._server = KRPCServer(port)
 		
 		# This is our routing table.
@@ -365,7 +365,7 @@ class DHT(object):
 		# Add the default nodes
 		DEFAULT_CONNECT_INFO = (socket.gethostbyaddr("router.bittorrent.com")[2][0], 6881)
 		DEFAULT_NODE = Node(DEFAULT_CONNECT_INFO)
-		DEFAULT_ID = self._server.ping(self._id,DEFAULT_NODE)['id']
+		DEFAULT_ID = self._server.ping(DEFAULT_NODE.useid,DEFAULT_NODE)['id']
 		with self._nodes_lock:
 			self._nodes[DEFAULT_ID] = DEFAULT_NODE
 
@@ -400,8 +400,9 @@ class DHT(object):
 		"""
 		# Try to establish links to close nodes
 		logger.info("Establishing connections to DHT")
-		self.find_node(self._id)
-			   
+		for node in self._nodes.values():
+			self.find_node(node.useid)
+
 		delay = self.self_find_delay
 
 		if self.active_discovery:
@@ -413,24 +414,24 @@ class DHT(object):
 				time.sleep(delay)
 				iteration += 1
 				if self.active_discovery and iteration % (self.active_discoveries + 1) != 0:
-					target = hashlib.sha1("this is my salt 2348724" + str(iteration)+self._id).digest()
+					target = os.urandom(20)
 					self.find_node(target)		        
 					logger.info("Tracing done, routing table contains %d nodes", len(self._nodes))
 				else:
 					# Regular maintenance:
 					#  Find N random nodes. Execute a find_node() on them.
 					#  toss them if they come up empty.
-					n = random.sample([(k,v) for k,v in self._nodes.items() if k[0] == self._id[0]],10)
-					for node_id, c in n:
+					n = random.sample(self._nodes.items(),10)
+					for node_id, node in n:
 						try:
-							r = self._server.find_node(self._id,c, self._id)
+							r = self._server.find_node(node.useid, node, node.useid)
 							if "nodes" in r:
 							    self._process_incoming_nodes(r["nodes"])
 						except KRPCTimeout:
 							# The node did not reply.
 							# Blacklist it.
 							with self._nodes_lock:
-							    self._bad.add(c)
+							    self._bad.add(node.c)
 							    if node_id in self._nodes:
 							        del self._nodes[node_id]
 					logger.info("Cleanup, routing table contains %d nodes", len(self._nodes))
@@ -483,7 +484,7 @@ class DHT(object):
 		while attempts < max_attempts:
 			for id_, node in self.get_close_nodes(target):
 				try:
-					r = function(self._id, node, target)
+					r = function(node.useid , node, target)
 					logger.debug("Results from %r ", node.c)# d.encode("hex"))
 					attempts += 1		        
 					if result_key and result_key in r:
@@ -506,7 +507,7 @@ class DHT(object):
 		if result_key:
 			# We were expecting a result, but we did not find it!
 			# Raise the NotFoundError exception instead of returning None
-			raise NotFoundError
+			raise NotFoundError, "No result!"
 
 	def find_node(self, target, attempts = 10):
 		""" 
@@ -531,10 +532,12 @@ class DHT(object):
 		"""
 		logger.info("REQUEST: %r %r" % (c, rec))
 		# Use the request to update teh routing table
+		n_id = rec["a"]["id"]
 		with self._nodes_lock:
-			self._nodes[rec["a"]["id"]] = Node(c)
+			self._nodes[n_id] = Node(c)
+		node = self._nodes[n_id]
 		# Skeleton response
-		resp = {"y":"r","t":rec["t"],"r":{"id":self._id}, "v":version}
+		resp = {"y":"r","t":rec["t"],"r":{"id":node.useid}, "v":version}
 		if rec["q"] == "ping":
 			self._server.send_krpc_reply(resp,c)
 		elif rec["q"] == "find_node":
@@ -548,8 +551,7 @@ class DHT(object):
 			# Token is based on nodes id, connection details
 			# torrent infohash to avoid clashes in NAT scenarios.
 			info_hash = rec["a"]["info_hash"]
-			peer_id = rec["a"]["id"]
-			token = hmac.new(self._key,info_hash+peer_id+str(c),hashlib.sha1).digest()
+			token = hmac.new(self._key,info_hash+n_id+str(c),hashlib.sha1).digest()
 			resp["r"]["token"] = token
 			# We dont actually keep any peer administration, so we
 			# always send back the closest nodes
@@ -558,8 +560,7 @@ class DHT(object):
 		elif rec["q"] == "announce_peer":
 			# First things first, validate the token.
 			info_hash = rec["a"]["info_hash"]
-			peer_id = rec["a"]["id"]
-			token = hmac.new(self._key,info_hash+peer_id+str(c),hashlib.sha1).digest()
+			token = hmac.new(self._key,info_hash+n_id+str(c),hashlib.sha1).digest()
 			if token != rec["a"]["token"]:
 				return # Ignore the request
 			else:

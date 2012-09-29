@@ -11,7 +11,7 @@
 # Written by Petru Paler
 
 from BTL import BTFailure
-
+import traceback as trace
 
 def decode_int(x, f):
 	f += 1
@@ -71,6 +71,7 @@ def bdecode_len(x):
 	try:
 		return decode_func[x[0]](x, 0)
 	except (IndexError, KeyError, ValueError):
+		trace.print_exc()
 		raise BTFailure("not a valid bencoded string")
 
 from types import StringType, IntType, LongType, DictType, ListType, TupleType

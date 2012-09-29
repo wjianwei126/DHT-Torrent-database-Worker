@@ -12,17 +12,22 @@ import hashlib
 def recvAll(stream, l):
 	data = ""
 	start = time.time()
-	while len(data) < l:
+	while True:
 		if time.time() > start + 60:
 			raise PeerException, "Read timed out"
 		data = data + stream.recv(l - len(data))
+		if len(data) < l:
+			time.sleep(0.1)
+		else:
+			break
 	return data
 
 class PeerException(Exception):
 	pass
 
 class Peer:
-	def __init__(self, socket, torrent = None):
+	def __init__(self, socket, torrent = None, timeout = 300):
+		self.timeout = timeout
 		self.socket = socket
 		self.torrent = torrent
 		self.handshakeSend = False
@@ -34,7 +39,7 @@ class Peer:
 		pstr_len = ord(recvAll(self.socket,1))
 		self.pstr = recvAll(self.socket, pstr_len) 
 		if self.pstr != "BitTorrent protocol":
-			socket.close()
+			self.close()
 			raise PeerException, "Peer uses wrong protocol (", pstr
 		
 		self.reserved = recvAll(self.socket,8)
@@ -111,6 +116,7 @@ class Peer:
 				self._sendHandshake()
 			if not self.handshakeReceived:
 				self._receiveHandshake()
+			time.sleep(0.1)
 	
 
 	def _requestPiece(self):
@@ -121,7 +127,11 @@ class Peer:
 
 	#Mainloop
 	def loop(self):
+		started = time.time()
 		while not self.torrent.finished and not self.closed:
+			if time.time() > started + self.timeout:
+				self.close()
+				raise PeerException, "Reached maximum timeout of %d seconds" % self.timeout
 			length, msgtype, content = self._receiveMessage()
 			if length > 0:
 				if msgtype == 20:
@@ -153,12 +163,15 @@ class Peer:
 			self.sendExtensionMessage(self.metadata_id,{'msg_type':2,'piece':piece})				
 		elif msg_type == 1:
 			#data
+			size = msg['total_size']
+			if size != self.torrent.metadataSize:
+				raise PeerException, "Peer was reporting wrong metadata size during download"
 			piece = msg['piece']	
 			self.torrent.gotMetadata(piece, extra)	
 			self._requestPiece()
 		elif msg_type == 2:
 			#reject
-			self.socket.close()
+			self.close()
 			raise PeerException, "Peer is rejecting metadata requests"
 
 	def _extended(self, data):
@@ -167,12 +180,12 @@ class Peer:
 			#handshake
 			payload = bencode.bdecode(data[1:])
 			if not "metadata_size" in payload or not "ut_metadata" in payload['m']:
-				self.socket.close()
+				self.close()
 				raise PeerException, "Peer does not support the ut_metadata extension"
 			
 			size = payload['metadata_size']
 			if size == 0:
-				self.socket.close()
+				self.close()
 				raise PeerException, "The peer does not appear to have any metadata"
 
 			self.torrent.setMetadataSize(size)
@@ -181,7 +194,7 @@ class Peer:
 			#everything seems fine, go ahead an request the first bit of metadata
 			self._requestPiece()
 		elif not self.extensionHandshakeReceived:
-			self.socket.close()
+			self.close()
 			raise PeerException, "Peer send extension messages before handshake"
 		
 		if msgtype == 3:
@@ -194,7 +207,8 @@ class Peer:
 		self.closed = True
 
 class Torrent:
-	def __init__(self, dht, info_hash):
+	def __init__(self, dht, info_hash, get_metadata):
+		self.get_metadata = get_metadata
 		self.dht = dht
 		self.info_hash = info_hash
 		self.metadata = {}
@@ -203,27 +217,44 @@ class Torrent:
 		self.finished = False
 		self.peer_list = set()
 		self.peers = []
+		self.started = time.time()
+		self.shutdown = False
 		start_new_thread(self._run, tuple())
 	
 	def gotMetadata(self, piece, content):
+		length = len(content)
+		slength = 16384
+		if piece == self.metadataPieces -1:
+			slength = self.metadataSize % 16384
+		if length < slength :
+			raise PeerException, "Received metadata piece of wrong length ("+str(length)+"/"+str(slength)+")"
+		elif length > slength:
+			content = content[0:slength]
 		if not piece in self.metadata:
 			self.metadata[piece] = content
 			self.log("Got metadata "+str(piece+1)+"/"+str(self.metadataPieces))
 		#Check if the torrent is finished
 		if self.getNeededPiece() == -1:
 			self.finished = True
+	
+	def peerCount(self):
+		return len(self.peer_list)
 
 	def disconnect(self):
+		self.shutdown = True
 		try:
 			for peer in self.peers:
 				peer.close()
+				self.peers.remove(peer)
 		except Exception, e:
 			traceback.print_exc()	
 
 	def setMetadataSize(self, size):
+		if size == 0:
+			raise PeerException, "Metadata size cannot be 0"
 		self.metadataSize = size
-		self.metadataPieces = math.ceil(size / 16384)		
-		self.log("Downloading "+str(self.metadataPieces)+" pieces of metadata")
+		self.metadataPieces = int(math.ceil(size / 16384.0))
+		self.log("Downloading "+str(self.metadataPieces)+" pieces of metadata ("+str(size)+" bytes)")
 	
 	def getNeededPiece(self):
 		piece = 0
@@ -231,25 +262,26 @@ class Torrent:
 		while piece < self.metadataPieces:
 			if not piece in self.metadata:
 				pieces.append(piece)
-			piece = piece + 1
+			piece += 1
 		if len(pieces) == 0:
 			return -1
 		return random.choice(pieces)
 
 	def openConnection(self, ip, port):
-		self.log("Connecting to peer "+ip+":"+str(port))
 		socket = pysocket.create_connection((ip, port),20)
 		peer = Peer(socket, self)
 		peer.performHandshake()
 		self._handlePeer(peer)
 
 	def addPeer(self, peer):
+		if not self.get_metadata:
+			peer.close()
+			raise Exception, "Not interested in metadata"
 		peer.torrent = self
 		peer.performHandshake()
 		self._handlePeer(peer)
 
 	def _handlePeer(self, peer):
-		self.log("Trying to download metadata from peer")
 		if peer.info_hash != self.info_hash:
 			peer.close()
 			raise PeerException, "Peer is serving the wrong torrent"
@@ -257,23 +289,25 @@ class Torrent:
 		
 		try:
 			peer.loop()
-			peer.close()
 		finally:
+			peer.close()
 			self.peers.remove(peer)
 	
 	def _updatePeers(self):
-		self.log("Getting peer list...")
 		peer_list = None
 		tries = 0
-		while peer_list == None:
+		while True:
 			try:
 				peer_list = self.dht.get_peers(self.info_hash)
 			except Exception, e:
-				if tries >= 3:
-					break
 				self.log("Problem getting peer list: "+str(e))
-				tries = tries + 1
-				time.sleep(10)
+				#traceback.print_exc()
+			if peer_list != None:
+				break;
+			if tries >= 3:
+				break
+			tries += 1
+			time.sleep(10)
 
 		if peer_list == None:
 			self.log("Couldn't get peer list...")
@@ -282,23 +316,33 @@ class Torrent:
 		self.log("Have "+str(len(self.peer_list))+" peers")
 
 	def _run(self):
-		self._updatePeers()
-		if len(self.peer_list) == 0:
-			self.log("Not enough peers, exiting...")
-		
-		for peer in self.peer_list:
-			if self.finished:
-				return
-			data = struct.unpack('>BBBBH',peer)
-			ip = '.'.join([str(d) for d in data[:4]])
-			port = data[4]
-			try:
-				self.openConnection(ip, port)					
-			except Exception, e:
-				self.log("Error while loading metadata from peer "+ip+": "+str(e))
-				#traceback.print_exc()
+		tries = 0
+		while not self.finished and not self.shutdown and tries <3:
+			tries += 1
+			self._updatePeers()
+			
+			if not self.get_metadata:
+				time.sleep(10)
+				continue
+
+			for peer in self.peer_list:
+				if self.finished or self.shutdown:
+					return
+				data = struct.unpack('>BBBBH',peer)
+				ip = '.'.join([str(d) for d in data[:4]])
+				port = data[4]
+				try:
+					self.openConnection(ip, port)					
+				except Exception, e:
+					self.log("Error while loading metadata from peer "+ip+": "+str(e))
+					#traceback.print_exc()
+
+		if not self.get_metadata and len(self.peer_list) > 0:
+			self.finished = True
 
 	def prepareData(self):
+		if not self.get_metadata:
+			return None
 		num = len(self.metadata)
 		if num != self.metadataPieces or num == 0:
 			return None
@@ -309,7 +353,7 @@ class Torrent:
 		sha.update(data)
 		info_hash = sha.digest()
 		if info_hash != self.info_hash:
-			self.log("The hashes do not match! ("+info_hash+") ")
+			self.log("The hashes do not match! ("+info_hash.encode("hex")+") ")
 			return None
 		return data		
 
@@ -317,44 +361,54 @@ class Torrent:
 		print "Torrent "+(self.info_hash.encode("hex"))+": "+str(what)
 
 class TorrentManager:
-	def __init__(self, dht, port, onfinish):
+	def __init__(self, dht, port, onfinish, timeout = 600):
+		self.timeout = timeout
 		self.dht = dht
 		self.port = port
 		self.onfinish = onfinish
 		self.running = {}
-		#Do not handle incoming connections
-		#start_new_thread(self._run,tuple())
+		start_new_thread(self._run,tuple())
 
-	def addTorrent(self, info_hash):
+	def addTorrent(self, info_hash, metadata = True):
 		if not info_hash in self.running:
-			torrent = Torrent(self.dht, info_hash)
+			torrent = Torrent(self.dht, info_hash, metadata)
 			self.running[info_hash] = torrent
 	
+	def count(self):
+		return len(self.running)
+
 	def fetchAndRemove(self):
-		for info_hash in self.running:
+		now = time.time()
+		for info_hash in self.running.keys():
 			torrent = self.running[info_hash]
 			if torrent.finished:
 				del self.running[info_hash]
 				torrent.disconnect()
-				return (info_hash, torrent.prepareData())
+				return (info_hash, torrent.peerCount(), torrent.prepareData())
+			elif now > torrent.started + self.timeout:
+				del self.running[info_hash]
+				torrent.log("Timeout")
+				torrent.disconnect()
+
 		return None
 
 	def _run(self):
 		serversocket = pysocket.socket(pysocket.AF_INET, pysocket.SOCK_STREAM)
 		serversocket.bind(('localhost', self.port))
-		serversocket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-		serversocket.bind((socket.gethostname(), self.port))
 		serversocket.listen(10)
 		while True:
 			socket, address = serversocket.accept()
 			start_new_thread(self._handlePeer, tuple(socket))
 
 	def _handlePeer(self, socket):
-		peer = Peer(socket)
-		peer.doReceiveHandshake()
-		info_hash = peer.info_hash			
-		if info_hash in self.running:
-			torrent = self.running[info_hash]
-			torrent.addPeer(peer)
-		else:
-			peer.close()
+		try:
+			peer = Peer(socket)
+			peer.doReceiveHandshake()
+			info_hash = peer.info_hash			
+			if info_hash in self.running:
+				torrent = self.running[info_hash]
+				torrent.addPeer(peer)
+			else:
+				peer.close()
+		except Exception, e:
+			print "Error while handling incoming connection: "+str(e)
