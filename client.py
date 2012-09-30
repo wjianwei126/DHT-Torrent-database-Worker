@@ -9,7 +9,10 @@ import urllib
 import urllib2
 import traceback
 import bencode
+import random
 
+#Maximal simultanous jobs
+MAX_JOBS = 35
 API_URL = "http://localhost:8080/mapi/";
 API_PASS = "test"
 
@@ -26,9 +29,6 @@ dht = lightdht.DHT(port=8000)
 #Running torrents that are downloading metadata
 manager = torrent.TorrentManager(dht, 8000, None)
 found_torrents = set()
-
-#Maximal simultanous jobs
-MAX_JOBS = 50
 
 def addHash(info_hash):
 	if len(info_hash) == 20:
@@ -67,11 +67,16 @@ def getNewWork():
 	njobs = manager.count()
 	if njobs < MAX_JOBS:
 		jobs =  get_work(MAX_JOBS - njobs)
+		first = True
 		for work in jobs:
+			#Sleep a random amount of time so if start multiple torrents at the same time we don't make to many requests and get banned
+			if not first:
+				time.sleep(random.random())
 			if work['type'] == 'download_metadata':
 				manager.addTorrent(work['info_hash'])
 			elif work['type'] == 'check_peers':
 				manager.addTorrent(work['info_hash'], metadata = False)
+			first = False
 
 def processFinished(info_hash, peers, data):
 	req = {'info_hash':info_hash, 'peers':peers}

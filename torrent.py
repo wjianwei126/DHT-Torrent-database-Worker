@@ -9,15 +9,27 @@ import math
 import random
 import hashlib
 
-def recvAll(stream, l):
+#Timeouts
+
+#Exceeding one of these will resilu in the peer being disconnected
+CONNECT_TIMEOUT = 10 #Maximum amount of time to wait for a connection to be established
+RECV_TIMEOUT = 40 #Maximum amount of time to wait for recv to get all the data
+PEER_TIMEOUT = 30 #Maximum amount of time to wait for a block of metadata
+#A torrent that takes longer than this will be canceled
+TORRENT_TIMEOUT = 600
+
+def recvAll(stream, l, timeout = RECV_TIMEOUT):
 	data = ""
 	start = time.time()
 	while True:
-		if time.time() > start + 60:
+		if time.time() >= start + timeout:
 			raise PeerException, "Read timed out"
-		data = data + stream.recv(l - len(data))
+		try:
+			data = data + stream.recv(l - len(data))
+		except pysocket.timeout:
+			pass
 		if len(data) < l:
-			time.sleep(0.1)
+			time.sleep(0.5)
 		else:
 			break
 	return data
@@ -26,7 +38,9 @@ class PeerException(Exception):
 	pass
 
 class Peer:
-	def __init__(self, socket, torrent = None, timeout = 300):
+	def __init__(self, socket, torrent = None, timeout = PEER_TIMEOUT):
+		socket.setblocking(True)
+		socket.settimeout(RECV_TIMEOUT)
 		self.timeout = timeout
 		self.socket = socket
 		self.torrent = torrent
@@ -87,7 +101,7 @@ class Peer:
 		reserved[5] = chr(0x10)
 		reserved = ''.join(reserved)
 		info_hash = self.torrent.info_hash
-		_id = "-TI0001-TORRENTINDEX"
+		_id = "-TI0002-TORRENTINDEX"
 		packed = chr(pstr_len) + pstr + reserved + info_hash + _id
 		self.socket.sendall(packed)
 		self._sendExtensionHandshake()
@@ -125,13 +139,15 @@ class Peer:
 		piece = self.torrent.getNeededPiece()
 		self._sendExtensionMessage(self.metadata_id,{'msg_type':0,'piece':piece})		
 
+	def resetTimeout(self):
+		self.limit = time.time() + self.timeout
+
 	#Mainloop
 	def loop(self):
-		started = time.time()
+		self.resetTimeout()
 		while not self.torrent.finished and not self.closed:
-			if time.time() > started + self.timeout:
-				self.close()
-				raise PeerException, "Reached maximum timeout of %d seconds" % self.timeout
+			if time.time() >= self.limit:
+				raise PeerException, "Peer timed out"
 			length, msgtype, content = self._receiveMessage()
 			if length > 0:
 				if msgtype == 20:
@@ -158,11 +174,12 @@ class Peer:
 		torrent = self.torrent
 		if msg_type == 0:
 			#request
-			#currently we are receting all of them
+			#currently we are rejeting all of them
 			piece = msg['piece']
 			self.sendExtensionMessage(self.metadata_id,{'msg_type':2,'piece':piece})				
 		elif msg_type == 1:
 			#data
+			self.resetTimeout()
 			size = msg['total_size']
 			if size != self.torrent.metadataSize:
 				raise PeerException, "Peer was reporting wrong metadata size during download"
@@ -241,12 +258,14 @@ class Torrent:
 
 	def disconnect(self):
 		self.shutdown = True
-		try:
-			for peer in self.peers:
+		for peer in self.peers:
+			try:
 				peer.close()
+			except Exception, e:
+				print(str(e))
+				traceback.print_exc()	
+			finally:
 				self.peers.remove(peer)
-		except Exception, e:
-			traceback.print_exc()	
 
 	def setMetadataSize(self, size):
 		if size == 0:
@@ -270,7 +289,7 @@ class Torrent:
 		return random.choice(pieces)
 
 	def openConnection(self, ip, port):
-		socket = pysocket.create_connection((ip, port), 10)
+		socket = pysocket.create_connection((ip, port), CONNECT_TIMEOUT)
 		peer = Peer(socket, self)
 		peer.performHandshake()
 		self._handlePeer(peer)
@@ -303,23 +322,24 @@ class Torrent:
 			self.log("Problem getting peer list: "+str(e))
 			#traceback.print_exc()
 		if peer_list == None:
-			self.log("Couldn't get peer list...")
 			return
 		self.peer_list = set(list(self.peer_list) + peer_list)
 
 	def _run(self):
+
 		tries = 0
 		while not self.finished and not self.shutdown and tries <3:
+			if tries != 0:
+				time.sleep(10)
 			tries += 1
 			self._updatePeers()
 			
-			if not self.get_metadata or len(self.peer_list) == 0:
-				time.sleep(10)
+			if not self.get_metadata:
 				continue
 
 			for peer in self.peer_list:
 				if self.finished or self.shutdown:
-					return
+					break
 				if len(peer)!=6:
 					continue
 				data = struct.unpack('>BBBBH',peer)
@@ -353,7 +373,7 @@ class Torrent:
 		print "Torrent "+(self.info_hash.encode("hex"))+": "+str(what)
 
 class TorrentManager:
-	def __init__(self, dht, port, onfinish, timeout = 600):
+	def __init__(self, dht, port, onfinish, timeout = TORRENT_TIMEOUT):
 		self.timeout = timeout
 		self.dht = dht
 		self.port = port
