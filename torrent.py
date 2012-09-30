@@ -297,20 +297,11 @@ class Torrent:
 	
 	def _updatePeers(self):
 		peer_list = None
-		tries = 0
-		while True:
-			try:
-				peer_list = self.dht.get_peers(self.info_hash)
-			except Exception, e:
-				self.log("Problem getting peer list: "+str(e))
-				#traceback.print_exc()
-			if peer_list != None:
-				break;
-			if tries >= 3:
-				break
-			tries += 1
-			time.sleep(10)
-
+		try:
+			peer_list = self.dht.get_peers(self.info_hash)
+		except Exception, e:
+			self.log("Problem getting peer list: "+str(e))
+			#traceback.print_exc()
 		if peer_list == None:
 			self.log("Couldn't get peer list...")
 			return
@@ -322,7 +313,7 @@ class Torrent:
 			tries += 1
 			self._updatePeers()
 			
-			if not self.get_metadata:
+			if not self.get_metadata or len(self.peer_list) == 0:
 				time.sleep(10)
 				continue
 
