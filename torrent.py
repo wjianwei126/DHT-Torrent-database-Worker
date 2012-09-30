@@ -232,7 +232,6 @@ class Torrent:
 			content = content[0:slength]
 		if not piece in self.metadata:
 			self.metadata[piece] = content
-			self.log("Got metadata "+str(piece+1)+"/"+str(self.metadataPieces))
 		#Check if the torrent is finished
 		if self.getNeededPiece() == -1:
 			self.finished = True
@@ -257,6 +256,9 @@ class Torrent:
 		self.log("Downloading "+str(self.metadataPieces)+" pieces of metadata ("+str(size)+" bytes)")
 	
 	def getNeededPiece(self):
+		"""
+		Returns a random metadata piece we still need
+		"""
 		piece = 0
 		pieces = []
 		while piece < self.metadataPieces:
@@ -268,7 +270,7 @@ class Torrent:
 		return random.choice(pieces)
 
 	def openConnection(self, ip, port):
-		socket = pysocket.create_connection((ip, port),20)
+		socket = pysocket.create_connection((ip, port), 10)
 		peer = Peer(socket, self)
 		peer.performHandshake()
 		self._handlePeer(peer)
@@ -313,7 +315,6 @@ class Torrent:
 			self.log("Couldn't get peer list...")
 			return
 		self.peer_list = set(list(self.peer_list) + peer_list)
-		self.log("Have "+str(len(self.peer_list))+" peers")
 
 	def _run(self):
 		tries = 0
@@ -328,6 +329,8 @@ class Torrent:
 			for peer in self.peer_list:
 				if self.finished or self.shutdown:
 					return
+				if len(peer)!=6:
+					continue
 				data = struct.unpack('>BBBBH',peer)
 				ip = '.'.join([str(d) for d in data[:4]])
 				port = data[4]
@@ -336,9 +339,7 @@ class Torrent:
 				except Exception, e:
 					self.log("Error while loading metadata from peer "+ip+": "+str(e))
 					#traceback.print_exc()
-
-		if not self.get_metadata and len(self.peer_list) > 0:
-			self.finished = True
+		self.finished = True
 
 	def prepareData(self):
 		if not self.get_metadata:
@@ -367,7 +368,8 @@ class TorrentManager:
 		self.port = port
 		self.onfinish = onfinish
 		self.running = {}
-		start_new_thread(self._run,tuple())
+		#Don't handle incoming connections
+		#start_new_thread(self._run,tuple())
 
 	def addTorrent(self, info_hash, metadata = True):
 		if not info_hash in self.running:
@@ -379,18 +381,18 @@ class TorrentManager:
 
 	def fetchAndRemove(self):
 		now = time.time()
+		ret = []
 		for info_hash in self.running.keys():
 			torrent = self.running[info_hash]
 			if torrent.finished:
 				del self.running[info_hash]
 				torrent.disconnect()
-				return (info_hash, torrent.peerCount(), torrent.prepareData())
+				ret.append((info_hash, torrent.peerCount(), torrent.prepareData()))
 			elif now > torrent.started + self.timeout:
 				del self.running[info_hash]
 				torrent.log("Timeout")
 				torrent.disconnect()
-
-		return None
+		return ret
 
 	def _run(self):
 		serversocket = pysocket.socket(pysocket.AF_INET, pysocket.SOCK_STREAM)

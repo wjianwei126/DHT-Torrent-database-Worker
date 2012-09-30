@@ -28,7 +28,7 @@ manager = torrent.TorrentManager(dht, 8000, None)
 found_torrents = set()
 
 #Maximal simultanous jobs
-MAX_JOBS = 20
+MAX_JOBS = 50
 
 def addHash(info_hash):
 	if len(info_hash) == 20:
@@ -57,6 +57,22 @@ def sendFound():
 	print("Sending %d info_hashes to server" % len(to_send))
 	makeRequest('put_hashes',to_send)
 
+def sendFinished():
+	ret = manager.fetchAndRemove()
+	for torrent in ret:
+		info_hash, peers, data = torrent
+		processFinished(info_hash, peers, data)
+
+def getNewWork():
+	njobs = manager.count()
+	if njobs < MAX_JOBS:
+		jobs =  get_work(MAX_JOBS - njobs)
+		for work in jobs:
+			if work['type'] == 'download_metadata':
+				manager.addTorrent(work['info_hash'])
+			elif work['type'] == 'check_peers':
+				manager.addTorrent(work['info_hash'], metadata = False)
+
 def processFinished(info_hash, peers, data):
 	req = {'info_hash':info_hash, 'peers':peers}
 	if data != None:
@@ -64,8 +80,11 @@ def processFinished(info_hash, peers, data):
 	print "Sending info of %s" % info_hash.encode("hex")
 	makeRequest('update',req)		
 
-def get_work():
-	return makeRequest('get_work')
+def get_work(amount):
+	jobs = []
+	for i in range(amount):
+		jobs.append(makeRequest('get_work'))
+	return jobs
 
 # handler
 def myhandler(rec, c):
@@ -90,14 +109,6 @@ with dht:
 	# Go to sleep and let the DHT service requests.
 	while True:
 		sendFound()
-		ret = manager.fetchAndRemove()
-		if ret != None:
-			info_hash, peers, data = ret
-			processFinished(info_hash, peers, data)
-		if manager.count() < MAX_JOBS:
-			work =  get_work()
-			if work['type'] == 'download_metadata':
-				manager.addTorrent(work['info_hash'])
-			elif work['type'] == 'check_peers':
-				manager.addTorrent(work['info_hash'], metadata = False)
+		sendFinished()
+		getNewWork()
 		time.sleep(10)	
