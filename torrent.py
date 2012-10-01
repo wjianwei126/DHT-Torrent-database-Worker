@@ -210,6 +210,7 @@ class Peer:
 			self.extensionHandshakeReceived = True
 			#everything seems fine, go ahead an request the first bit of metadata
 			self._requestPiece()
+			self.resetTimeout()
 		elif not self.extensionHandshakeReceived:
 			self.close()
 			raise PeerException, "Peer send extension messages before handshake"

@@ -472,7 +472,7 @@ class DHT(object):
 		return nodes[:N]		  
 
 
-	def _recurse(self, target, function, max_attempts=3, result_key=None):
+	def _recurse(self, target, function, max_attempts=4, result_key=None):
 		"""
 			Recursively query the DHT, following "nodes" replies
 			until we hit the desired key

@@ -17,7 +17,7 @@ API_URL = "http://localhost:8080/mapi/";
 API_PASS = "test"
 
 # Enable logging:
-lightdht.logger.setLevel(logging.WARNING)	 
+lightdht.logger.setLevel(logging.ERROR)	 
 formatter = logging.Formatter("[%(levelname)s@%(created)s] %(message)s")
 stdout_handler = logging.StreamHandler()
 stdout_handler.setFormatter(formatter)
@@ -69,16 +69,11 @@ def getNewWork():
 	njobs = manager.count()
 	if njobs < MAX_JOBS:
 		jobs =  get_work(MAX_JOBS - njobs)
-		first = True
 		for work in jobs:
-			#Sleep a random amount of time so if start multiple torrents at the same time we don't make to many requests and get banned
-			if not first:
-				time.sleep(random.random())
 			if work['type'] == 'download_metadata':
 				manager.addTorrent(work['info_hash'])
 			elif work['type'] == 'check_peers':
 				manager.addTorrent(work['info_hash'], metadata = False)
-			first = False
 
 def processFinished(info_hash, peers, data):
 	req = {'info_hash':info_hash, 'peers':peers}
@@ -101,9 +96,7 @@ def myhandler(rec, c):
 			if "info_hash" in a:
 				info_hash = a["info_hash"]
 				addHash(info_hash)
-
 	finally:
-		# always ALWAYS pass it off to the real handler
 		dht.default_handler(rec,c) 
 
 dht.handler = myhandler
