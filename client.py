@@ -12,7 +12,7 @@ import bencode
 import random
 
 #Maximal simultanous jobs
-MAX_JOBS = 35
+MAX_JOBS = 30
 API_URL = "http://localhost:8080/mapi/";
 API_PASS = "test"
 
@@ -35,17 +35,19 @@ def addHash(info_hash):
 		found_torrents.add(info_hash)
 
 def makeRequest(method, body = None):
-	try:
-		data = {'method':method, 'password':API_PASS}
-		if body != None:
-			body = bencode.bencode(body).encode("base64")
-			data['body'] = body
-		data = urllib.urlencode(data)
-		req = urllib2.Request(API_URL,data)
-		response = urllib2.urlopen(req).read()
-		return bencode.bdecode(response.decode("base64"))
-	except urllib2.HTTPError, e:
-		print "Error while making requests: "+str(e)
+	data = {'method':method, 'password':API_PASS}
+	if body != None:
+		body = bencode.bencode(body).encode("base64")
+		data['body'] = body
+	data = urllib.urlencode(data)
+	while True:
+		try:
+			req = urllib2.Request(API_URL,data)
+			response = urllib2.urlopen(req).read()
+			return bencode.bdecode(response.decode("base64"))
+		except (urllib2.HTTPError, urllib2.URLError), e:
+			print "Error while making requests: %s. Retrying in 10 seconds" % str(e)
+			time.sleep(10)
 	return None
 
 def sendFound():

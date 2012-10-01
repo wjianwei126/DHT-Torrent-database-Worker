@@ -472,7 +472,7 @@ class DHT(object):
 		return nodes[:N]		  
 
 
-	def _recurse(self, target, function, max_attempts=10, result_key=None):
+	def _recurse(self, target, function, max_attempts=3, result_key=None):
 		"""
 			Recursively query the DHT, following "nodes" replies
 			until we hit the desired key
@@ -482,11 +482,11 @@ class DHT(object):
 		logger.debug("Recursing to target %r" % target.encode("hex"))
 		attempts = 0
 		while attempts < max_attempts:
+			attempts += 1		        
 			for id_, node in self.get_close_nodes(target):
 				try:
 					r = function(node.useid , node, target)
 					logger.debug("Results from %r ", node.c)# d.encode("hex"))
-					attempts += 1		        
 					if result_key and result_key in r:
 						return r[result_key]
 					if "nodes" in r:

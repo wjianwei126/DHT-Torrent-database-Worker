@@ -13,7 +13,7 @@ import hashlib
 
 #Exceeding one of these will resilu in the peer being disconnected
 CONNECT_TIMEOUT = 10 #Maximum amount of time to wait for a connection to be established
-RECV_TIMEOUT = 40 #Maximum amount of time to wait for recv to get all the data
+RECV_TIMEOUT = 60 #Maximum amount of time to wait for recv to get all the data
 PEER_TIMEOUT = 30 #Maximum amount of time to wait for a block of metadata
 #A torrent that takes longer than this will be canceled
 TORRENT_TIMEOUT = 600
@@ -51,16 +51,16 @@ class Peer:
 
 	def _receiveHandshake(self):
 		pstr_len = ord(recvAll(self.socket,1))
-		self.pstr = recvAll(self.socket, pstr_len) 
-		if self.pstr != "BitTorrent protocol":
+		pstr = recvAll(self.socket, pstr_len) 
+		if pstr != "BitTorrent protocol":
 			self.close()
-			raise PeerException, "Peer uses wrong protocol (", pstr
+			raise PeerException, "Peer uses wrong protocol" 
 		
 		self.reserved = recvAll(self.socket,8)
 		#Check if the peer supports the extension protocol
 		if ord(self.reserved[5]) & 0x10 != 0x10:
 			self.socket.close()
-			raise PeerException, "Peer does not support the extension protocol"
+			raise PeerException, "Not supporting extensions"
 
 		self.info_hash = recvAll(self.socket,20)
 		self.peer_id = recvAll(self.socket,20)
@@ -82,7 +82,7 @@ class Peer:
 	def _receiveMessage(self):
 		socket = self.socket
 		length = struct.unpack(">I",recvAll(socket,4))[0]
-		masgtype = None
+		msgtype = None
 		content = None
 		if length>0:
 			msgtype = ord(recvAll(socket,1))
@@ -198,7 +198,7 @@ class Peer:
 			payload = bencode.bdecode(data[1:])
 			if not "metadata_size" in payload or not "ut_metadata" in payload['m']:
 				self.close()
-				raise PeerException, "Peer does not support the ut_metadata extension"
+				raise PeerException, "Not supporting ut_metadata extension"
 			
 			size = payload['metadata_size']
 			if size == 0:
@@ -236,6 +236,7 @@ class Torrent:
 		self.peers = []
 		self.started = time.time()
 		self.shutdown = False
+		self.got_peers = False 
 		start_new_thread(self._run, tuple())
 	
 	def gotMetadata(self, piece, content):
@@ -265,7 +266,11 @@ class Torrent:
 				print(str(e))
 				traceback.print_exc()	
 			finally:
-				self.peers.remove(peer)
+				try:
+					self.peers.remove(peer)
+				except ValueError:
+					#Was not in list
+					pass
 
 	def setMetadataSize(self, size):
 		if size == 0:
@@ -307,35 +312,43 @@ class Torrent:
 			peer.close()
 			raise PeerException, "Peer is serving the wrong torrent"
 		self.peers.append(peer)
-		
 		try:
 			peer.loop()
 		finally:
 			peer.close()
-			self.peers.remove(peer)
+			try:
+				self.peers.remove(peer)
+			except ValueError:
+				#was not on list
+				pass
 	
 	def _updatePeers(self):
 		peer_list = None
 		try:
 			peer_list = self.dht.get_peers(self.info_hash)
-		except Exception, e:
+		except (lightdht.KRPCTimeout, lightdht.KRPCError, lightdht.NotFoundError), e:
 			self.log("Problem getting peer list: "+str(e))
-			#traceback.print_exc()
+			return
+
 		if peer_list == None:
 			return
+		self.got_peers = True
 		self.peer_list = set(list(self.peer_list) + peer_list)
 
 	def _run(self):
 
 		tries = 0
-		while not self.finished and not self.shutdown and tries <3:
+		while not self.finished and not self.shutdown and tries <2:
 			if tries != 0:
 				time.sleep(10)
 			tries += 1
 			self._updatePeers()
 			
 			if not self.get_metadata:
-				continue
+				if len(self.peer_list) > 0:
+					break
+				else:
+					continue
 
 			for peer in self.peer_list:
 				if self.finished or self.shutdown:
@@ -347,8 +360,8 @@ class Torrent:
 				port = data[4]
 				try:
 					self.openConnection(ip, port)					
-				except Exception, e:
-					self.log("Error while loading metadata from peer "+ip+": "+str(e))
+				except (PeerException, pysocket.error, pysocket.timeout), e:
+					self.log("Error "+ip+": "+str(e))
 					#traceback.print_exc()
 		self.finished = True
 
@@ -398,7 +411,10 @@ class TorrentManager:
 			if torrent.finished:
 				del self.running[info_hash]
 				torrent.disconnect()
-				ret.append((info_hash, torrent.peerCount(), torrent.prepareData()))
+				data = torrent.prepareData()
+				peers = torrent.peerCount()
+				if data != None or torrent.got_peers:
+					ret.append((info_hash, peers, data))
 			elif now > torrent.started + self.timeout:
 				del self.running[info_hash]
 				torrent.log("Timeout")
