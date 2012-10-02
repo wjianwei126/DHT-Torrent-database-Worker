@@ -333,6 +333,9 @@ class Torrent:
 
 		if peer_list == None:
 			return
+		if type(peer_list) == str:
+			peer_list = [peer_list]
+		peer_list = filter(lambda x:len(x)==6, peer_list)
 		self.got_peers = True
 		self.peer_list = set(list(self.peer_list) + peer_list)
 
